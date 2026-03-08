@@ -1,6 +1,18 @@
-Flask==2.3.3
-Flask-CORS==4.0.0
-beautifulsoup4==4.12.2
-requests==2.31.0
-gunicorn==21.2.0
-playwright==1.40.0
+FROM mcr.microsoft.com/playwright/python:v1.40.0-focal
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    playwright install chromium
+
+COPY app.py .
+
+EXPOSE 5000
+
+ENV PYTHONUNBUFFERED=1
+ENV PORT=5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "--workers", "1", "app:app"]
+
