@@ -1,15 +1,18 @@
-FROM python:3.11-slim
+from flask import Flask, jsonify
 
-WORKDIR /app
+app = Flask(__name__)
 
-COPY requirements.txt .
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        'status': 'ok',
+        'message': '服务运行正常',
+        'version': '1.0.0'
+    })
 
-RUN pip install --no-cache-dir -r requirements.txt
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({'hello': 'world'})
 
-COPY app.py .
-
-EXPOSE 5000
-
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "app.py"]
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
