@@ -9,16 +9,9 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-import zipfile
 import platform
 
-from selenium import webdriver
-from selenium.webdriver.edge.service import Service
-from selenium.webdriver.edge.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
+from playwright.sync_api import sync_playwright, Page
 from bs4 import BeautifulSoup
 
 # 创建Flask应用
@@ -36,35 +29,12 @@ scraper_status = {
 
 
 class JDCommentScraper:
-    """京东评论爬虫"""
+    """京东评论爬虫 - Playwright版本"""
     
     def __init__(self):
-        self.driver = None
+        self.browser = None
+        self.page = None
         self.is_running = True
-        
-    def _find_edge_browser(self):
-        """查找Edge浏览器"""
-        system = platform.system().lower()
-        
-        if system == "windows":
-            possible_paths = [
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
-                os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
-            ]
-        elif system == "darwin":
-            possible_paths = [
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-            ]
-        else:
-            possible_paths = ["/usr/bin/microsoft-edge"]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                return path
-        
-        return None
     
     def _update_status(self, progress, message, error=None):
         """更新状态"""
@@ -73,29 +43,12 @@ class JDCommentScraper:
         if error:
             scraper_status['error'] = error
     
-    def _find_review_container(self):
-        """找到评论容器"""
-        selectors = [
-            "[class*='_rateListContainer_']",
-            "[class*='rateListContainer']",
-        ]
-        
-        for selector in selectors:
-            try:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    if element.is_displayed() and element.size['height'] > 100:
-                        return element
-            except:
-                continue
-        return None
-    
     def _extract_reviews(self):
         """提取评论"""
         reviews = []
         try:
-            page_source = self.driver.page_source
-            soup = BeautifulSoup(page_source, 'html.parser')
+            page_content = self.page.content()
+            soup = BeautifulSoup(page_content, 'html.parser')
             text_content = soup.get_text()
             
             pattern = r'([a-zA-Z0-9_*]{3,20})\s*(\d{2}-\d{2})\s*(苹果\d+[a-zA-Z]*[^，。！]*?)\s*([^0-9]{30,500}?)\s*(\d{1,4})'
@@ -127,58 +80,50 @@ class JDCommentScraper:
     
     def scrape(self, product_url):
         """爬取评论"""
+        playwright = None
         try:
             scraper_status['is_running'] = True
             scraper_status['error'] = None
             
-            # 初始化浏览器
+            # 启动Playwright
             self._update_status(10, "初始化浏览器...")
+            playwright = sync_playwright().start()
             
-            edge_options = Options()
-            edge_options.add_argument('--no-proxy-server')
-            edge_options.add_argument('--proxy-bypass-list=*')
-            edge_options.add_argument('--disable-blink-features=AutomationControlled')
-            edge_options.add_argument('--disable-dev-shm-usage')
-            edge_options.add_argument('--no-sandbox')
-            edge_options.add_argument('--disable-gpu')
-            edge_options.add_argument('--ignore-certificate-errors')
-            edge_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            self.browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage'
+                ]
+            )
             
-            edge_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            edge_options.add_experimental_option('useAutomationExtension', False)
+            context = self.browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
             
-            # 获取Edge路径
-            edge_path = self._find_edge_browser()
-            if not edge_path:
-                raise Exception("未找到Microsoft Edge浏览器")
-            
-            service = Service(edge_path)
-            self.driver = webdriver.Edge(service=service, options=edge_options)
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.set_page_load_timeout(30)
+            self.page = context.new_page()
+            self.page.set_default_timeout(30000)
             
             self._update_status(20, "浏览器启动成功")
             
             # 访问页面
             self._update_status(30, "访问商品页面...")
-            self.driver.get(product_url)
-            time.sleep(5)
+            self.page.goto(product_url, wait_until='networkidle')
+            time.sleep(3)
             
             if not self.is_running:
                 return []
             
             # 滚动到评论区
             self._update_status(40, "滚动到评论区...")
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.6);")
-            time.sleep(3)
+            self.page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
+            time.sleep(2)
             
             # 点击大家评
             try:
-                comment_tab = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '大家评')]"))
-                )
-                self.driver.execute_script("arguments[0].click();", comment_tab)
-                time.sleep(5)
+                self.page.click("text='大家评'", timeout=5000)
+                time.sleep(3)
             except:
                 pass
             
@@ -187,20 +132,16 @@ class JDCommentScraper:
             
             # 点击全部评价
             try:
-                all_btn = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '全部评价')]"))
-                )
-                self.driver.execute_script("arguments[0].click();", all_btn)
-                time.sleep(5)
+                self.page.click("text='全部评价'", timeout=5000)
+                time.sleep(3)
             except:
                 pass
             
             self._update_status(50, "开始收集评论...")
-            time.sleep(3)
+            time.sleep(2)
             
             # 收集评论
             all_reviews = []
-            scroll_container = self._find_review_container()
             previous_count = 0
             no_new_count = 0
             
@@ -210,11 +151,8 @@ class JDCommentScraper:
                 
                 try:
                     # 滚动
-                    if scroll_container:
-                        self.driver.execute_script("arguments[0].scrollTop += 500", scroll_container)
-                    else:
-                        self.driver.execute_script("window.scrollBy(0, 400);")
-                    time.sleep(1.5)
+                    self.page.evaluate("window.scrollBy(0, 400)")
+                    time.sleep(1)
                     
                     # 每3轮提取
                     if scroll_round % 3 == 0:
@@ -253,8 +191,12 @@ class JDCommentScraper:
             self._update_status(0, f"错误: {str(e)}", str(e))
             raise
         finally:
-            if self.driver:
-                self.driver.quit()
+            if self.page:
+                self.page.close()
+            if self.browser:
+                self.browser.close()
+            if playwright:
+                playwright.stop()
             scraper_status['is_running'] = False
 
 
@@ -278,24 +220,8 @@ def scrape():
     {
         "url": "https://item.jd.com/10141989827074.html"
     }
-    
-    返回格式:
-    {
-        "status": "success",
-        "data": [
-            {
-                "username": "用户名",
-                "rating": "5星",
-                "date": "2024-01-01",
-                "product_model": "苹果iPhone 15",
-                "content": "评论内容",
-                "likes": 10
-            }
-        ]
-    }
     """
     try:
-        # 获取请求参数
         data = request.get_json()
         
         if not data or 'url' not in data:
@@ -307,14 +233,12 @@ def scrape():
         
         product_url = data['url'].strip()
         
-        # 验证URL
         if not product_url.startswith('http'):
             return jsonify({
                 'status': 'error',
                 'message': 'URL格式不正确'
             }), 400
         
-        # 检查是否已在爬取
         if scraper_status['is_running']:
             return jsonify({
                 'status': 'error',
@@ -322,11 +246,8 @@ def scrape():
                 'progress': scraper_status['progress']
             }), 400
         
-        # 创建爬虫并开始爬取
         scraper = JDCommentScraper()
         reviews = scraper.scrape(product_url)
-        
-        # 按点赞数排序
         reviews.sort(key=lambda x: x['likes'], reverse=True)
         
         return jsonify({
@@ -346,15 +267,7 @@ def scrape():
 
 @app.route('/scrape/async', methods=['POST'])
 def scrape_async():
-    """异步爬取评论接口
-    
-    请求格式:
-    {
-        "url": "https://item.jd.com/10141989827074.html"
-    }
-    
-    返回: task_id 用于轮询状态
-    """
+    """异步爬取评论接口"""
     try:
         data = request.get_json()
         
@@ -373,7 +286,6 @@ def scrape_async():
         
         product_url = data['url'].strip()
         
-        # 在后台线程中开始爬取
         def background_scrape():
             try:
                 scraper = JDCommentScraper()
@@ -447,15 +359,7 @@ def scrape_stop():
 
 @app.route('/stats', methods=['POST'])
 def get_stats():
-    """获取评论统计
-    
-    请求格式:
-    {
-        "url": "https://item.jd.com/10141989827074.html"
-    }
-    
-    返回评论统计信息
-    """
+    """获取评论统计"""
     try:
         data = request.get_json()
         url = data.get('url')
@@ -495,8 +399,6 @@ def get_stats():
         }), 500
 
 
-# ===== 测试页面 =====
-
 @app.route('/', methods=['GET'])
 def index():
     """API文档"""
@@ -507,59 +409,49 @@ def index():
         <meta charset="utf-8">
         <title>京东评论爬取 API</title>
         <style>
-            body { font-family: Arial; margin: 20px; }
-            .endpoint { background: #f5f5f5; padding: 15px; margin: 15px 0; border-radius: 5px; }
-            code { background: #e8e8e8; padding: 2px 5px; }
-            h2 { color: #333; }
+            body { font-family: Arial; margin: 20px; background: #f5f5f5; }
+            .container { max-width: 900px; margin: 0 auto; }
+            h1 { color: #333; }
+            .endpoint { background: white; padding: 20px; margin: 15px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            code { background: #e8e8e8; padding: 3px 8px; border-radius: 3px; font-family: monospace; }
+            h2 { color: #0066cc; font-size: 18px; }
+            p { line-height: 1.6; }
         </style>
     </head>
     <body>
-        <h1>🚀 京东评论爬取 API 文档</h1>
-        
-        <div class="endpoint">
-            <h2>1. 健康检查</h2>
-            <p><strong>GET</strong> /health</p>
-            <p>检查服务是否运行正常</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>2. 爬取评论 (同步)</h2>
-            <p><strong>POST</strong> /scrape</p>
-            <p><strong>请求体:</strong></p>
-            <code>{"url": "https://item.jd.com/10141989827074.html"}</code>
-            <p><strong>返回:</strong> JSON格式的评论数据</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>3. 爬取评论 (异步)</h2>
-            <p><strong>POST</strong> /scrape/async</p>
-            <p>后台运行爬取，返回任务ID</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>4. 获取状态</h2>
-            <p><strong>GET</strong> /scrape/status</p>
-            <p>获取当前爬取任务的状态和进度</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>5. 获取结果</h2>
-            <p><strong>GET</strong> /scrape/result</p>
-            <p>获取爬取完成后的结果</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>6. 停止爬取</h2>
-            <p><strong>POST</strong> /scrape/stop</p>
-            <p>停止正在进行的爬取任务</p>
-        </div>
-        
-        <div class="endpoint">
-            <h2>7. 获取统计信息</h2>
-            <p><strong>POST</strong> /stats</p>
-            <p><strong>请求体:</strong></p>
-            <code>{"url": "https://item.jd.com/10141989827074.html"}</code>
-            <p>返回评论统计数据（总数、点赞、平均等）</p>
+        <div class="container">
+            <h1>🚀 京东评论爬取 API 文档</h1>
+            
+            <div class="endpoint">
+                <h2>1. 健康检查</h2>
+                <p><strong>GET</strong> /health</p>
+                <p>检查服务是否运行正常</p>
+            </div>
+            
+            <div class="endpoint">
+                <h2>2. 爬取评论 (同步)</h2>
+                <p><strong>POST</strong> /scrape</p>
+                <p><strong>请求体:</strong></p>
+                <code>{"url": "https://item.jd.com/10141989827074.html"}</code>
+            </div>
+            
+            <div class="endpoint">
+                <h2>3. 爬取评论 (异步)</h2>
+                <p><strong>POST</strong> /scrape/async</p>
+                <p>后台运行爬取</p>
+            </div>
+            
+            <div class="endpoint">
+                <h2>4. 获取状态</h2>
+                <p><strong>GET</strong> /scrape/status</p>
+                <p>获取当前爬取任务的状态</p>
+            </div>
+            
+            <div class="endpoint">
+                <h2>5. 获取结果</h2>
+                <p><strong>GET</strong> /scrape/result</p>
+                <p>获取爬取完成后的结果</p>
+            </div>
         </div>
     </body>
     </html>
@@ -567,8 +459,6 @@ def index():
 
 
 if __name__ == '__main__':
-    # 生产环境建议使用gunicorn或waitress
-    # 开发环境可直接运行
     app.run(
         host='0.0.0.0',
         port=5000,
